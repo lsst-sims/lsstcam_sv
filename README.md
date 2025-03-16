@@ -1,1 +1,3 @@
-# comcam_sv
+# LSSTCam SV
+
+fbs configuration planning
