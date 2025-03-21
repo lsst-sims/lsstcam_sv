@@ -3,43 +3,55 @@ from rubin_scheduler.scheduler.utils import BasePixelEvolution
 
 
 class PerFilterStep(BasePixelEvolution):
-    """Make a custom step function per filter
-    """
-    def __init__(self, survey_length=80, nfilters=6, u_loaded=None, y_loaded=None):
-        self.nfilters = nfilters
+    """Make a custom step function per filter"""
+
+    def __init__(
+        self,
+        survey_length=80,
+        bands=None,
+        loaded_dict=None,
+    ):
+
+        if bands is None:
+            bands = ["u", "g", "r", "i", "z", "y"]
+        if loaded_dict is None:
+            loaded_dict = {}
+
+        self.bands = bands
         self.survey_length = survey_length
 
-        if u_loaded is None:
-            self.u_loaded = np.arange(survey_length)
-        else:
-            self.u_loaded = u_loaded
+        self.bands2indx = {}
+        for i, bandname in enumerate(bands):
+            self.bands2indx[bandname] = i
 
-        if y_loaded is None:
-            self.y_loaded = np.arange(survey_length)
-        else:
-            self.y_loaded = y_loaded
+        self.slopes = {}
+        self.loaded_dict = {}
 
-        self.u_slope = 1./self.u_loaded.size
-        self.y_slope = 1./self.y_loaded.size
+        for bandname in bands:
+            if bandname in loaded_dict.keys():
+                self.loaded_dict[bandname] = loaded_dict[bandname]
+                self.slopes[bandname] = 1.0 / loaded_dict[bandname].size
 
     def __call__(self, t_elapsed, phase):
+        """
+        Parameters
+        ----------
+        t_elapsed : `float`
+            Time elapsed in the survey (days).
+        """
 
         # filters all the time evolve linearly increase between
         # 0 and 1 for length of survey.
-        frac_done = t_elapsed/self.survey_length
+        frac_done = t_elapsed / self.survey_length
 
         # broadcast out to n_filters
-        result = np.tile(phase*0 + frac_done, (self.nfilters, 1))
+        result = np.tile(phase * 0 + frac_done, (len(self.bands), 1))
 
-        # u_band
-        n_u = np.where(self.u_loaded <= t_elapsed)[0].size
-        u_result = result[0, :]*0 + n_u*self.u_slope
-        result[0, :] = u_result
-
-        # y band
-        n_y = np.where(self.y_loaded <= t_elapsed)[0].size
-        y_result = result[-1, :]*0 + n_y*self.y_slope
-        result[-1, :] = y_result
+        for bandname in self.loaded_dict:
+            days_completed = np.where(self.loaded_dict[bandname] <= t_elapsed)[0].size
+            result[self.bands2indx[bandname], :] = (
+                result[self.bands2indx[bandname], :] * 0
+                + days_completed * self.slopes[bandname]
+            )
 
         return result
-
