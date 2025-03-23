@@ -42,13 +42,18 @@ def survey_times(survey_start: Time | None = None,
         (almanac.sunsets["night"] > 0) & (almanac.sunsets["night"] <= survey_length)
     )
     sunsets = almanac.sunsets[match]["sun_n12_setting"]
+    civil_sunsets = almanac.sunsets[match]['sunset']
     sunrises = almanac.sunsets[match]["sun_n12_rising"]
+
+    moon_illum = almanac.interpolators['moon_phase'](civil_sunsets)
 
     survey_info = {'survey_start': survey_start,
                    'survey_end': survey_end,
                    'survey_length': survey_length,
                    'sunsets': sunsets,
                    'sunrises': sunrises,
+                   'civil_sunsets': civil_sunsets,
+                   'moon_illum': moon_illum,
                    'almanac': almanac,
                    'site': site}
 
