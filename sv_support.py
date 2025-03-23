@@ -321,3 +321,5 @@ def save_opsim(filename: str, observatory: ModelObservatory, observations: Obser
     info = run_info_table(observatory)
     converter = SchemaConverter()
     converter.obs2opsim(observations, filename=filename, info=info, delete_past=True)
+    visits_df = converter.obs2opsim(observations)
+    return visits_df
