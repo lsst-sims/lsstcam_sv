@@ -400,7 +400,9 @@ def optimize_ddf_times(
     mjds = []
     for night_check in nights_to_use:
         in_night = np.where(
-            (night == night_check) & (np.isfinite(ddf_grid["%s_m5_g" % ddf_name]))
+            (night == night_check)
+            & (np.isfinite(ddf_grid["%s_m5_g" % ddf_name]))
+            & (big_mask == 1)
         )[0]
         m5s = ddf_grid["%s_m5_g" % ddf_name][in_night]
         # we could intorpolate this to get even better than 15 min
@@ -431,6 +433,7 @@ def generate_ddf_scheduled_obs(
     ddf_config_file="ocean1.dat",
     overhead=4.0,
     illum_limit=40.0,
+    science_program="BLOCK-365",
 ):
     """
 
@@ -600,6 +603,8 @@ def generate_ddf_scheduled_obs(
                     obs["nexp"] = nsnaps[bandname]
                     obs["scheduler_note"] = "DD:%s" % ddf_name
                     obs["target_name"] = "DD:%s" % ddf_name
+                    obs["science_program"] = science_program
+                    obs["observation_reason"] = "DDF %s" % ddf_name
 
                     obs["mjd_tol"] = mjd_tol
                     obs["dist_tol"] = dist_tol
@@ -623,8 +628,8 @@ def generate_ddf_scheduled_obs(
                     obs["nexp"] = nsnaps[bandname]
                     obs["scheduler_note"] = "DD:%s" % ddf_name.replace("_a", "_b")
                     obs["target_name"] = "DD:%s" % ddf_name.replace("_a", "_b")
-                    obs["science_program"] = "BLOCK-365"
-                    obs["observation_reason"] = "DDF %s" % ddf_name
+                    obs["science_program"] = science_program
+                    obs["observation_reason"] = "DDF %s" % ddf_name.replace("_a", "_b")
 
                     obs["mjd_tol"] = mjd_tol
                     obs["dist_tol"] = dist_tol
@@ -648,7 +653,7 @@ def generate_ddf_scheduled_obs(
                     obs["nexp"] = nsnaps[bandname]
                     obs["scheduler_note"] = "DD:%s" % ddf_name
                     obs["target_name"] = "DD:%s" % ddf_name
-                    obs["science_program"] = "BLOCK-365"
+                    obs["science_program"] = science_program
                     obs["observation_reason"] = "DDF %s" % ddf_name
 
                     obs["mjd_tol"] = mjd_tol
