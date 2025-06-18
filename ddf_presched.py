@@ -7,17 +7,85 @@ __all__ = (
 
 import os
 import warnings
-
+import copy
 import numpy as np
 import pandas as pd
 from rubin_scheduler.data import get_data_dir
 from rubin_scheduler.scheduler.utils import ScheduledObservationArray
 from rubin_scheduler.site_models import Almanac
 from rubin_scheduler.utils import SURVEY_START_MJD, calc_season, ddf_locations
+import rubin_scheduler.scheduler.detailers as detailers
+from rubin_scheduler.scheduler.utils import ObservationArray
+from rubin_scheduler.scheduler.features import Conditions
+
+class BandSortDetailer(detailers.BaseDetailer):
+    """Detailer that sorts an array of observations by specified
+    band order, in order to minimize filter changes.
+
+    Useful for scripted surveys with many filter changes like DDFs.
+
+    Parameters
+    ----------
+    desired_band_order : `str`
+        The desired band order.
+    loaded_first : `bool`
+        If True, then the currently-in-use filter is always moved to
+        the start of the desired band order, to remove the first filter change.
+    """
+
+    def __init__(self, desired_band_order: str ="ugrizy", loaded_first : bool =True, **kwargs):
+        self.desired_band_order = desired_band_order
+        self.loaded_first = loaded_first
+
+    def __call__(self, observation_array : ObservationArray, conditions : Conditions) -> ObservationArray:
+
+        order_to_set = copy.copy(self.desired_band_order)
+        if self.loaded_first:
+            order_to_set = order_to_set.replace(conditions.current_band, "")
+            order_to_set = conditions.current_band + order_to_set
+        indicies = []
+        for bandname in order_to_set:
+            indicies.append(np.where(observation_array["band"] == bandname)[0])
+
+        indices = np.concatenate(indicies)
+
+        return observation_array[indices]
+
+
+class SplitDither(detailers.BaseDetailer):
+    """Combine two detailers, but choose which one of them to use, based on
+    the presence of a specified string in the scheduler_note.
+
+    Useful to identify different kinds of observations in a ScriptedSurvey
+    and then apply different detailers (such as EuclidDetailer vs. standard
+    DDF dither detailer).
+
+    Parameters
+    ----------
+    det1 : `detailers.BaseDetailer`
+        The first detailer, to use if the `split_str` is not present
+        in scheduler_note.
+    det2 : `detailers.BaseDetailer`
+        The second detailer, to use if `split_str` is present.
+    split_str : `str`
+        Search for this string in scheduler_note (matches sub-string).
+    """
+
+    def __init__(self, det1 : detailers.BaseDetailer, det2: detailers.BaseDetailer, split_str : str="EDFS"):
+        self.det1 = det1
+        self.det2 = det2
+        self.split_str = split_str
+
+    def __call__(self, observation_array, conditions):
+        string_in = [self.split_str in note for note in observation_array["scheduler_note"]]
+        string_out = np.logical_not(string_in)
+
+        observation_array[string_out] = self.det1(observation_array[string_out], conditions)
+        observation_array[string_in] = self.det2(observation_array[string_in], conditions)
+        return observation_array
 
 
 def ddf_slopes(
-    ddf_name,
     raw_obs,
     night_season,
     season_seq=30,
@@ -31,8 +99,6 @@ def ddf_slopes(
 
     Parameters
     ----------
-    ddf_name : `str`
-       The DDF name to use
     raw_obs : `np.array`, (N,)
         An array with values of 1 or zero. One element per night, value of
         1 indicates the night is during an active observing season.
@@ -359,7 +425,6 @@ def optimize_ddf_times(
     # Can fail on a partial season with nothing in bounds
     if np.sum(raw_obs) > 0:
         cumulative_desired = ddf_slopes(
-            ddf_name,
             raw_obs,
             night_season,
             season_seq=season_seq,
@@ -395,16 +460,15 @@ def optimize_ddf_times(
     nights_to_use = unights[np.where(unight_sched == 1)]
 
     # For each night, find the best time in the night and preschedule the DDF.
-    # XXX--probably need to expand this part to resolve the times when
-    # multiple things get scheduled
     mjds = []
     for night_check in nights_to_use:
         in_night = np.where(
-            (night == night_check) & (np.isfinite(ddf_grid["%s_m5_g" % ddf_name]))
+            (night == night_check)
+            & (np.isfinite(ddf_grid["%s_m5_g" % ddf_name]))
+            & (big_mask == 1)
         )[0]
         m5s = ddf_grid["%s_m5_g" % ddf_name][in_night]
-        # we could intorpolate this to get even better than 15 min
-        # resolution on when to observe
+        # We could interpolate for better resolution than 15 minutes.
         max_indx = np.where(m5s == m5s.max())[0].min()
         mjds.append(ddf_grid["mjd"][in_night[max_indx]])
 
@@ -419,7 +483,7 @@ def generate_ddf_scheduled_obs(
     alt_max=85,
     HA_min=20.0,
     HA_max=4.0,
-    sun_alt_max=-24,
+    sun_alt_max=-18,
     moon_min_distance=25.0,
     dist_tol=3.0,
     bands="ugrizy",
@@ -431,6 +495,7 @@ def generate_ddf_scheduled_obs(
     ddf_config_file="ocean1.dat",
     overhead=4.0,
     illum_limit=40.0,
+    science_program="BLOCK-365",
 ):
     """
 
@@ -494,6 +559,8 @@ def generate_ddf_scheduled_obs(
     illum_limit : `float`
         The moon illumination limit for when u and y are loaded.
         Default 40 (percent).
+    science_program : `str`
+        Name of the science_program to use for DDFs.
     """
     if data_file is None:
         data_file = os.path.join(get_data_dir(), "scheduler", "ddf_grid.npz")
@@ -528,7 +595,7 @@ def generate_ddf_scheduled_obs(
     for index, row in configs.iterrows():
 
         ddf_name = row["ddf_name"]
-        offseason_length = (365.0 - row["season_length"]) / 2.0  # stupid factor of 2
+        offseason_length = (365.0 - row["season_length"]) / 2.0
         n_sequences = row["n_sequences"]
 
         sequence_time = 0.0
@@ -571,7 +638,7 @@ def generate_ddf_scheduled_obs(
             ddf_grid,
             sun_limit=sun_alt_max,
             sequence_time=sequence_time / 60.0,
-            airmass_limit=3.0,
+            airmass_limit=2.6,
             sky_limit=None,
             g_depth_limit=row["g_depth_limit"],
             offseason_length=offseason_length,
@@ -588,6 +655,7 @@ def generate_ddf_scheduled_obs(
         for mjd in mjds:
             for bandname in sequence_dict:
                 if "EDFS" in ddf_name:
+                    # ScheduledObservations for EDFS_a
                     obs = ScheduledObservationArray(
                         n=int(np.ceil(sequence_dict[bandname] / 2))
                     )
@@ -599,8 +667,9 @@ def generate_ddf_scheduled_obs(
                     obs["band"] = bandname
                     obs["nexp"] = nsnaps[bandname]
                     obs["scheduler_note"] = "DD:%s" % ddf_name
-                    obs["target_name"] = "DD:%s" % ddf_name
-
+                    obs["target_name"] = "DDF %s" % ddf_name
+                    obs["science_program"] = science_program
+                    obs["observation_reason"] = "DDF %s" % ddf_name
                     obs["mjd_tol"] = mjd_tol
                     obs["dist_tol"] = dist_tol
                     # Need to set something for HA limits
@@ -610,7 +679,7 @@ def generate_ddf_scheduled_obs(
                     obs["alt_max"] = alt_max
                     obs["sun_alt_max"] = sun_alt_max
                     all_scheduled_obs.append(obs)
-
+                    # ScheduledObservations for EDFS_b
                     obs = ScheduledObservationArray(
                         n=int(np.ceil(sequence_dict[bandname] / 2))
                     )
@@ -622,9 +691,9 @@ def generate_ddf_scheduled_obs(
                     obs["band"] = bandname
                     obs["nexp"] = nsnaps[bandname]
                     obs["scheduler_note"] = "DD:%s" % ddf_name.replace("_a", "_b")
-                    obs["target_name"] = "DD:%s" % ddf_name.replace("_a", "_b")
-                    obs["science_program"] = "BLOCK-365"
-                    obs["observation_reason"] = "DDF %s" % ddf_name
+                    obs["target_name"] = "DDF %s" % ddf_name.replace("_a", "_b")
+                    obs["science_program"] = science_program
+                    obs["observation_reason"] = "DDF %s" % ddf_name.replace("_a", "_b")
 
                     obs["mjd_tol"] = mjd_tol
                     obs["dist_tol"] = dist_tol
@@ -647,8 +716,8 @@ def generate_ddf_scheduled_obs(
                     obs["band"] = bandname
                     obs["nexp"] = nsnaps[bandname]
                     obs["scheduler_note"] = "DD:%s" % ddf_name
-                    obs["target_name"] = "DD:%s" % ddf_name
-                    obs["science_program"] = "BLOCK-365"
+                    obs["target_name"] = "DDF %s" % ddf_name
+                    obs["science_program"] = science_program
                     obs["observation_reason"] = "DDF %s" % ddf_name
 
                     obs["mjd_tol"] = mjd_tol
