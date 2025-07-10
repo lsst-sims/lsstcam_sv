@@ -5,95 +5,31 @@ __all__ = (
     "optimize_ddf_times",
 )
 
+import copy
 import os
 import warnings
-import copy
+
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
+import rubin_scheduler.scheduler.detailers as detailers
 from rubin_scheduler.data import get_data_dir
-from rubin_scheduler.scheduler.utils import ScheduledObservationArray
+from rubin_scheduler.scheduler.features import Conditions
+from rubin_scheduler.scheduler.utils import ObservationArray, ScheduledObservationArray
 from rubin_scheduler.site_models import Almanac
 from rubin_scheduler.utils import SURVEY_START_MJD, calc_season, ddf_locations
-import rubin_scheduler.scheduler.detailers as detailers
-from rubin_scheduler.scheduler.utils import ObservationArray
-from rubin_scheduler.scheduler.features import Conditions
 
-class BandSortDetailer(detailers.BaseDetailer):
-    """Detailer that sorts an array of observations by specified
-    band order, in order to minimize filter changes.
-
-    Useful for scripted surveys with many filter changes like DDFs.
-
-    Parameters
-    ----------
-    desired_band_order : `str`
-        The desired band order.
-    loaded_first : `bool`
-        If True, then the currently-in-use filter is always moved to
-        the start of the desired band order, to remove the first filter change.
-    """
-
-    def __init__(self, desired_band_order: str ="ugrizy", loaded_first : bool =True, **kwargs):
-        self.desired_band_order = desired_band_order
-        self.loaded_first = loaded_first
-
-    def __call__(self, observation_array : ObservationArray, conditions : Conditions) -> ObservationArray:
-
-        order_to_set = copy.copy(self.desired_band_order)
-        if self.loaded_first:
-            order_to_set = order_to_set.replace(conditions.current_band, "")
-            order_to_set = conditions.current_band + order_to_set
-        indicies = []
-        for bandname in order_to_set:
-            indicies.append(np.where(observation_array["band"] == bandname)[0])
-
-        indices = np.concatenate(indicies)
-
-        return observation_array[indices]
-
-
-class SplitDither(detailers.BaseDetailer):
-    """Combine two detailers, but choose which one of them to use, based on
-    the presence of a specified string in the scheduler_note.
-
-    Useful to identify different kinds of observations in a ScriptedSurvey
-    and then apply different detailers (such as EuclidDetailer vs. standard
-    DDF dither detailer).
-
-    Parameters
-    ----------
-    det1 : `detailers.BaseDetailer`
-        The first detailer, to use if the `split_str` is not present
-        in scheduler_note.
-    det2 : `detailers.BaseDetailer`
-        The second detailer, to use if `split_str` is present.
-    split_str : `str`
-        Search for this string in scheduler_note (matches sub-string).
-    """
-
-    def __init__(self, det1 : detailers.BaseDetailer, det2: detailers.BaseDetailer, split_str : str="EDFS"):
-        self.det1 = det1
-        self.det2 = det2
-        self.split_str = split_str
-
-    def __call__(self, observation_array, conditions):
-        string_in = [self.split_str in note for note in observation_array["scheduler_note"]]
-        string_out = np.logical_not(string_in)
-
-        observation_array[string_out] = self.det1(observation_array[string_out], conditions)
-        observation_array[string_in] = self.det2(observation_array[string_in], conditions)
-        return observation_array
 
 
 def ddf_slopes(
-    raw_obs,
-    night_season,
-    season_seq=30,
-    min_season_length=0,
-    boost_early_factor=None,
-    boost_factor_third=None,
-    boost_factor_fractional=None,
-):
+    raw_obs: npt.NDArray,
+    night_season: npt.NDArray,
+    season_seq: int = 30,
+    min_season_length: float = 0,
+    boost_early_factor: float | None = None,
+    boost_factor_third: float | None = None,
+    boost_factor_fractional: float | None = None,
+) -> npt.NDArray:
     """
     Let's make custom slopes for each DDF
 
@@ -124,6 +60,12 @@ def ddf_slopes(
     boost_factor_fractional : `float`
         If there is an initial partial season, also boost that one by
         the given factor.
+
+    Returns
+    -------
+    cumulative_desired : `np.ndarray`, (N,)
+        A mapping of the cumulative number of observations that
+        should be acquired at each time of `raw_obs`.
     """
 
     int_season = np.floor(night_season)
@@ -176,7 +118,11 @@ def ddf_slopes(
     return cumulative_desired
 
 
-def match_cumulative(cumulative_desired, mask=None, no_duplicate=True):
+def match_cumulative(
+    cumulative_desired: npt.NDArray,
+    mask: npt.NDArray | None = None,
+    no_duplicate: bool = True,
+) -> npt.NDArray:
     """Generate a schedule that tries to match the desired cumulative
     distribution given a mask
 
@@ -234,27 +180,27 @@ def match_cumulative(cumulative_desired, mask=None, no_duplicate=True):
 
 
 def optimize_ddf_times(
-    ddf_name,
-    ddf_RA,
-    ddf_grid,
-    sun_limit=-18,
-    sequence_time=60.0,
-    airmass_limit=2.5,
-    sky_limit=None,
-    g_depth_limit=23.5,
-    offseason_length=73.05,
-    low_season_frac=0,
-    low_season_rate=0.3,
-    mjd_start=SURVEY_START_MJD,
-    season_seq=30,
-    boost_early_factor=None,
-    boost_factor_third=None,
-    boost_factor_fractional=None,
-    only_season=None,
-    mask_even_odd=None,
-    moon_illum_lt=None,
-    moon_illum_gt=None,
-):
+    ddf_name: str,
+    ddf_RA: float,
+    ddf_grid: npt.NDArray,
+    sun_limit: float = -18,
+    sequence_time: float = 60.0,
+    airmass_limit: float = 2.5,
+    sky_limit: float | None = None,
+    g_depth_limit: float = 23.5,
+    offseason_length: float = 73.05,
+    low_season_frac: float = 0,
+    low_season_rate: float = 0.3,
+    mjd_start: float = SURVEY_START_MJD,
+    season_seq: int = 30,
+    boost_early_factor: float | None = None,
+    boost_factor_third: float | None = None,
+    boost_factor_fractional: float | None = None,
+    only_season: int | None = None,
+    mask_even_odd: bool | None = None,
+    moon_illum_lt: float | None = None,
+    moon_illum_gt: float | None = None,
+) -> list[npt.NDArray, npt.NDArray, npt.NDArray, npt.NDArray]:
     """
 
     Parameters
@@ -476,86 +422,61 @@ def optimize_ddf_times(
 
 
 def generate_ddf_scheduled_obs(
-    data_file=None,
-    mjd_tol=15,
-    expt={"u": 38, "g": 29.2, "r": 29.2, "i": 29.2, "z": 29.2, "y": 29.2},
-    alt_min=25,
-    alt_max=85,
-    HA_min=20.0,
-    HA_max=4.0,
-    sun_alt_max=-18,
-    moon_min_distance=25.0,
-    dist_tol=3.0,
-    bands="ugrizy",
-    nsnaps={"u": 1, "g": 2, "r": 2, "i": 2, "z": 2, "y": 2},
-    mjd_start=SURVEY_START_MJD,
-    survey_length=10.0,
-    low_season_frac=0,
-    low_season_rate=0.3,
-    ddf_config_file="ocean1.dat",
-    overhead=4.0,
-    illum_limit=40.0,
-    science_program="BLOCK-365",
+    ddf_config_file: str,
+    data_file: str = None,
+    mjd_tol: float = 15,
+    expt: dict = {"u": 38, "g": 30, "r": 30, "i": 30, "z": 30, "y": 30},
+    nsnaps: dict = {"u": 1, "g": 1, "r": 1, "i": 1, "z": 1, "y": 1},
+    alt_min: float = 25,
+    alt_max: float = 85,
+    HA_min: float = 20.0,
+    HA_max: float = 4.0,
+    sun_alt_max: float = -18,
+    moon_min_distance: float = 25.0,
+    dist_tol: float = 3.0,
+    mjd_start: float = SURVEY_START_MJD,
+    survey_length: float = 10.0,
+    overhead: float = 4.0,
+    illum_limit: float = 40.0,
+    science_program: str | None = None,
 ):
-    """
+    """Generate the prescheduled observations for the DDFs.
 
     Parameters
     ----------
-    data_file : `path` (None)
+    ddf_config_file : `str`
+        Filename for the DDF configuration information.
+    data_file : `path` or None
         The data file to use for DDF airmass, m5, etc. Defaults to
-        using whatever is in rubin_sim_data/scheduler directory.
-    flush_length : `float` (2)
+        Default of None uses ddf_grid.npz from RUBIN_SIM_DATA_DIR.
+    flush_length : `float`
         How long to keep a scheduled observation around before it is
         considered failed and flushed (days).
-    mjd_tol : `float` (15)
+    mjd_tol : `float`
         How close an observation must be in time to be considered
         matching a scheduled observation (minutes).
-    expt : `float` (30)
+    expt : `dict` { `str` : `float` }
         Total exposure time per visit (seconds).
-    alt_min/max : `float` (25, 85)
+    nsnaps : `dict` { `str` : `float` }
+        The number of snaps to use per visit, for each band.
+    alt_min/max : `float` `float`
         The minimum and maximum altitudes to permit observations to
         happen (degrees).
-    HA_min/max : `float` (21, 3)
+    HA_min/max : `float` `float`
         The hour angle limits to permit observations to happen (hours).
     moon_min_distance : `float`
         The minimum distance to demand from the moon (degrees).
     dist_tol : `float` (3)
         The distance tolerance for a visit to be considered matching a
         scheduled observation (degrees).
-    nvis_master : list of ints ([8, 10, 20, 20, 24, 18])
-        The number of visits to make per band
-    bands : `str` (ugrizy)
-        The band names.
-    nsnaps : `list of ints` ([1, 2, 2, 2, 2, 2])
-        The number of snaps to use per band
     mjd_start : `float`
         Starting MJD of the survey. Default None, which calls
         rubin_sim.utils.SURVEY_START_MJD
     survey_length : `float`
         Length of survey (years). Default 10.
-    sequence_time : `float`, optional
-        Expected time for each DDF sequence, used to avoid hitting the
-        sun_limit (running DDF visits into twilight). In minutes.
-    season_unobs_frac : `float`, optional
-        Defines the end of the range of the prescheduled observing season.
-        season runs from 0 (sun's apparent position is at the RA of the DDF)
-        to 1 (sun returns to an apparent position in the RA of the DDF).
-        The scheduled season runs from:
-        season_unobs_frac < season < (1-season_unobs_fract)
-    low_season_frac : `float`, optional
-        Defines the end of the range of the "low cadence" prescheduled
-        observing season.
-        The "standard cadence" season runs from:
-        low_season_frac < season < (1 - low_season_frac)
-        For an 'accordian' style DDF with fewer observations near
-        the ends of the season, set this to a value larger than
-        `season_unobs_frac`. Values smaller than `season_unobs_frac`
-        will result in DDFs with a constant rate throughout the season.
-    low_season_rate : `float`, optional
-        Defines the rate to use within the low cadence portion
-        of the season. During the standard season, the 'rate' is 1.
-        This is used in `ddf_slopes` to define the desired number of
-        cumulative observations for each DDF over time.
+    overhead : `float`
+        Overhead (in seconds) for each visit. Includes any time outside
+        of the exposure (on-sky) time, shutter and readout and any settle.
     illum_limit : `float`
         The moon illumination limit for when u and y are loaded.
         Default 40 (percent).

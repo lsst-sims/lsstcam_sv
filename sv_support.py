@@ -4,28 +4,18 @@ from astropy.time import Time
 
 astropy.utils.iers.conf.iers_degraded_accuracy = "ignore"
 
-from rubin_scheduler.scheduler.model_observatory import (
-    KinemModel,
-    ModelObservatory,
-    tma_movement,
-)
+from rubin_scheduler.scheduler.model_observatory import ModelObservatory, tma_movement
 from rubin_scheduler.scheduler.utils import (
-    CurrentAreaMap,
-    Footprint,
     ObservationArray,
     SchemaConverter,
-    generate_all_sky,
-    make_rolling_footprints,
     run_info_table,
 )
 from rubin_scheduler.site_models import Almanac
-from rubin_scheduler.utils import Site, angular_separation
-
+from rubin_scheduler.utils import Site
 
 __all__ = [
     "survey_times",
     "lst_over_survey_time",
-    "survey_footprint",
     "setup_observatory",
     "count_obstime",
     "save_opsim",
@@ -33,9 +23,9 @@ __all__ = [
 
 
 def survey_times(
-    verbose: bool = True, random_seed: int = 55, early_dome_closure: float = 2.0
+    verbose: bool = True, random_seed: int = 55, early_dome_closure: float = 2.0, no_downtime: bool = False,
 ) -> dict:
-    survey_start = Time("2025-06-18T12:00:00", format="isot", scale="utc")
+    survey_start = Time("2025-06-20T12:00:00", format="isot", scale="utc")
     survey_end = Time("2025-09-22T12:00:00", format="isot", scale="utc")
     survey_length = int(np.ceil((survey_end - survey_start).jd))
 
@@ -77,7 +67,7 @@ def survey_times(
         "moon_illum": moon_illum,
         "site": site,
         "nside": 32,
-        "early_dome_closure" : early_dome_closure
+        "early_dome_closure": early_dome_closure,
     }
 
     # Add time limits and downtime
@@ -85,75 +75,85 @@ def survey_times(
     # 2 hours per night for SV survey from June 15 - July 1
     # choose best time (moon down)
     # whole night from July 1 - September 15 with random downtime
-    # 25% downtime ?
+    # 40% downtime ?
 
-    rng = np.random.default_rng(seed=random_seed)
+    if not no_downtime:
+        rng = np.random.default_rng(seed=random_seed)
 
-    night_start = sunsets
-    night_end = actual_sunrises - early_dome_closure / 24.0
-    # Almanac always counts moon rise and set in the current night, after sunset
-    # dark ends with either sunrise or moonrise
-    dark_end = np.where(moon_rise < night_end, moon_rise, night_end)
-    # dark starts with either sunset or moonset
-    dark_start = np.where(moon_set < night_end, moon_set, night_start)
-    # but sometimes the moon can be up the whole night
-    up_all_night = np.where(dark_end < dark_start)
-    dark_start[up_all_night] = 0
-    dark_end[up_all_night] = 0
+        night_start = sunsets
+        night_end = actual_sunrises - early_dome_closure / 24.0
+        # Almanac always counts moon rise and set in the current night, after sunset
+        # dark ends with either sunrise or moonrise
+        dark_end = np.where(moon_rise < night_end, moon_rise, night_end)
+        # dark starts with either sunset or moonset
+        dark_start = np.where(moon_set < night_end, moon_set, night_start)
+        # but sometimes the moon can be up the whole night
+        up_all_night = np.where(dark_end < dark_start)
+        dark_start[up_all_night] = 0
+        dark_end[up_all_night] = 0
 
-    two_hours = "random"
-    if two_hours == "random":
-        # Choose a random 2 hours within these times,
-        obs_start = np.zeros(len(dark_start))
-        good = np.where(
-            (dark_end - dark_start - 2.5 / 24 > 0) & (night_start < survey_mid.mjd)
-        )
-        obs_start[good] = rng.uniform(
-            low=dark_start[good], high=dark_end[good] - 2.5 / 24
-        )
-        # Add downtime from the start of the night until the observations
-        down_starts = actual_sunsets[good]
-        down_ends = obs_start[good]
-        # Add downtime from after the observation until sunrise
-        down_starts = np.concatenate([down_starts, obs_start[good] + 2.1 / 24.0])
-        down_ends = np.concatenate([down_ends, actual_sunrises[good]])
-        # if moon up all night AND before survey_mid, remove the whole night
-        bad = np.where(
-            (dark_end - dark_start - 2.5 / 24 <= 0) & (night_start < survey_mid.mjd)
-        )
-        down_starts = np.concatenate([down_starts, actual_sunsets[bad]])
-        down_ends = np.concatenate([down_ends, actual_sunrises[bad]])
+        two_hours = "random"
+        if two_hours == "random":
+            # Choose a random 2 hours within these times,
+            obs_start = np.zeros(len(dark_start))
+            good = np.where(
+                (dark_end - dark_start - 2.5 / 24 > 0) & (night_start < survey_mid.mjd)
+            )
+            obs_start[good] = rng.uniform(
+                low=dark_start[good], high=dark_end[good] - 2.5 / 24
+            )
+            # Add downtime from the start of the night until the observations
+            down_starts = actual_sunsets[good]
+            down_ends = obs_start[good]
+            # Add downtime from after the observation until sunrise
+            down_starts = np.concatenate([down_starts, obs_start[good] + 2.1 / 24.0])
+            down_ends = np.concatenate([down_ends, actual_sunrises[good]])
+            # if moon up all night AND before survey_mid, remove the whole night
+            bad = np.where(
+                (dark_end - dark_start - 2.5 / 24 <= 0) & (night_start < survey_mid.mjd)
+            )
+            down_starts = np.concatenate([down_starts, actual_sunsets[bad]])
+            down_ends = np.concatenate([down_ends, actual_sunrises[bad]])
 
-    # Then let's add random periods of downtime within each night,
-    # Assume some chance of having some amount of downtime
-    # (but this is simplistic and assumes downtime ~twice per night)
-    random_downtime = 0
-    for count in range(3):
-        threshold = 1.0 - (count / 5)
-        prob_down = rng.random(len(night_start))
-        time_down = rng.gumbel(loc=0.5, scale=1, size=len(night_start))  # in hours
-        # apply probability of having downtime or not
-        time_down = np.where(prob_down <= threshold, time_down, 0)
-        avail_in_night = (night_end - night_start) * 24
-        time_down = np.where(time_down >= avail_in_night, avail_in_night, time_down)
-        time_down = np.where(time_down <= 0, 0, time_down)
-        d_starts = rng.uniform(low=night_start, high=night_end - time_down / 24)
-        d_ends = d_starts + time_down / 24.0
-        # But only use these after July 15 -
-        d_starts = d_starts[mid_offset:]
-        d_ends = d_ends[mid_offset:]
-        random_downtime += ((d_ends - d_starts) * 24).sum()
-        night_hours = avail_in_night[mid_offset:].sum()
-        print("cycle", count, random_downtime, night_hours, random_downtime / night_hours)
-        # combine previous expected downtime and random downtime
-        down_starts = np.concatenate([down_starts, d_starts])
-        down_ends = np.concatenate([down_ends, d_ends])
+        # Then let's add random periods of downtime within each night,
+        # Assume some chance of having some amount of downtime
+        # (but this is simplistic and assumes downtime ~twice per night)
+        random_downtime = 0
+        for count in range(3):
+            threshold = 1.0 - (count / 5)
+            prob_down = rng.random(len(night_start))
+            time_down = rng.gumbel(loc=0.5, scale=1, size=len(night_start))  # in hours
+            # apply probability of having downtime or not
+            time_down = np.where(prob_down <= threshold, time_down, 0)
+            avail_in_night = (night_end - night_start) * 24
+            time_down = np.where(time_down >= avail_in_night, avail_in_night, time_down)
+            time_down = np.where(time_down <= 0, 0, time_down)
+            d_starts = rng.uniform(low=night_start, high=night_end - time_down / 24)
+            d_ends = d_starts + time_down / 24.0
+            # But only use these after July 15 -
+            d_starts = d_starts[mid_offset:]
+            d_ends = d_ends[mid_offset:]
+            random_downtime += ((d_ends - d_starts) * 24).sum()
+            night_hours = avail_in_night[mid_offset:].sum()
+            print(
+                "cycle", count, random_downtime, night_hours, random_downtime / night_hours
+            )
+            # combine previous expected downtime and random downtime
+            down_starts = np.concatenate([down_starts, d_starts])
+            down_ends = np.concatenate([down_ends, d_ends])
 
-    # And mask the final hour of the night through the survey
-    # (already done for 0:mid)
-    if early_dome_closure > 0:
-        down_starts = np.concatenate([down_starts, actual_sunrises[mid_offset:] - early_dome_closure / 24])
-        down_ends = np.concatenate([down_ends, actual_sunrises[mid_offset:]])
+        # And mask the final hour of the night through the survey
+        # (already done for 0:mid)
+        if early_dome_closure > 0:
+            down_starts = np.concatenate(
+                [down_starts, actual_sunrises[mid_offset:] - early_dome_closure / 24]
+            )
+            down_ends = np.concatenate([down_ends, actual_sunrises[mid_offset:]])
+
+    else:
+        # Only early dome closure
+        down_starts = actual_sunrises - early_dome_closure / 24
+        down_ends = actual_sunrises
 
     # Turn into an array of downtimes for sim_runner
     # down_starts/ down_ends should be mjd times for internal-ModelObservatory use
@@ -264,8 +264,6 @@ def lst_over_survey_time(survey_info: dict) -> None:
     print(
         "lst sunset @ mid", sunset_mid_lst.deg, "lst sunrise @ mid", sunrise_mid_lst.deg
     )
-
-
 
 
 def setup_observatory(survey_info: dict) -> ModelObservatory:

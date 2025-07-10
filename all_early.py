@@ -26,6 +26,7 @@ from astropy import units as u
 from astropy.coordinates import SkyCoord
 from astropy.utils import iers
 from rubin_scheduler.scheduler import sim_runner
+from rubin_scheduler.scheduler.example import simple_greedy_survey
 from rubin_scheduler.scheduler.model_observatory import ModelObservatory
 from rubin_scheduler.scheduler.schedulers import CoreScheduler, SimpleBandSched
 from rubin_scheduler.scheduler.surveys import (
@@ -44,16 +45,17 @@ from rubin_scheduler.scheduler.utils import (
 )
 from rubin_scheduler.site_models import Almanac
 from rubin_scheduler.utils import DEFAULT_NSIDE, SURVEY_START_MJD, _hpid2_ra_dec
-from rubin_scheduler.scheduler.example import simple_greedy_survey
 
-from ddf_presched import generate_ddf_scheduled_obs, SplitDither, BandSortDetailer
+from ddf_presched import BandSortDetailer, SplitDither, generate_ddf_scheduled_obs
 
 # So things don't fail on hyak
 iers.conf.auto_download = False
 # XXX--note this line probably shouldn't be in production
 iers.conf.auto_max_age = None
 
-from sv_config import safety_masks, survey_footprint
+from sv_config import survey_footprint
+from sv_surveys import safety_masks
+
 
 def example_scheduler(
     nside: int = DEFAULT_NSIDE,
@@ -384,7 +386,14 @@ def template_surveys(
         bfs.append((bf.OnlyBeforeNightBasisFunction(night_max=366), 0.0))
 
         # Mask anything observed n_obs_template times
-        bfs.append((bf.MaskAfterNObsBasisFunction(nside=nside, n_max=n_obs_template[bandname], bandname=bandname), 0.0))
+        bfs.append(
+            (
+                bf.MaskAfterNObsBasisFunction(
+                    nside=nside, n_max=n_obs_template[bandname], bandname=bandname
+                ),
+                0.0,
+            )
+        )
 
         # unpack the basis functions and weights
         weights = [val[1] for val in bfs]
@@ -1401,7 +1410,9 @@ def ddf_surveys(
     #    & (obs_array["scheduler_note"] != "DD:EDFS_a")
     # )[0]
 
-    survey1 = ScriptedSurvey(safety_masks(nside, shadow_minutes=30), nside=nside, detailers=detailers)
+    survey1 = ScriptedSurvey(
+        safety_masks(nside, shadow_minutes=30), nside=nside, detailers=detailers
+    )
     survey1.set_script(obs_array)
 
     result = [survey1]
@@ -1790,14 +1801,15 @@ def gen_scheduler(args):
         dither_detailer,
         u_detailer,
         detailers.Rottep2RotspDesiredDetailer(),
-        BandSortDetailer(),]
+        BandSortDetailer(),
+    ]
 
     ddfs = ddf_surveys(
         detailers=details,
         nside=nside,
         mjd_start=mjd_start,
         survey_length=survey_length / 365.25,
-        ddf_config_file="ddf_sv.dat"
+        ddf_config_file="ddf_sv.dat",
     )
 
     greedy = gen_greedy_surveys(nside, nexp=nexp, footprints=footprints)
@@ -1844,11 +1856,12 @@ def gen_scheduler(args):
         science_program=science_program,
     )
 
-
     lvk_templates = []
     for band in ["g", "i"]:
         extra_templates_masks = safety_masks(nside=nside)
-        extra_templates_masks.append(bf.MaskAfterNObsBasisFunction(nside=nside, n_max=4, bandname=band))
+        extra_templates_masks.append(
+            bf.MaskAfterNObsBasisFunction(nside=nside, n_max=4, bandname=band)
+        )
         s = simple_greedy_survey(
             nside=nside,
             bandname=band,
